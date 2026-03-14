@@ -9,148 +9,159 @@ on:
         required: false
       release:
         description: "是否需要发布到Release? (不发布也可以到Artifacts下载)"
-        default: 'yes'
+        default: "yes"
         required: false
+
+permissions:
+  contents: write
 
 jobs:
   padavan:
     runs-on: ubuntu-latest
 
     steps:
-    - name: 生成版本号
-      run: |
-        whoami
-        id
-        echo 接收到的输入参数:
-        echo "${{ github.event.inputs.production }}"
-        echo "${{ github.event.inputs.release }}"
-        echo
-        echo 当前目录:$(pwd)
+      - name: 生成版本号
+        shell: bash
+        run: |
+          whoami
+          id
+          echo 接收到的输入参数:
+          echo "${{ github.event.inputs.production }}"
+          echo "${{ github.event.inputs.release }}"
+          echo
+          echo 当前目录:$(pwd)
 
-        VERSION=$(TZ='Asia/Shanghai' date +%Y.%m.%d-%H%M)
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-        echo "DIR=/opt/rt-n56u" >> $GITHUB_ENV
+          VERSION=$(TZ='Asia/Shanghai' date +%Y.%m.%d-%H%M)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "DIR=/opt/rt-n56u" >> "$GITHUB_ENV"
 
-        val1="${{ github.event.inputs.production }}"
-        val2=$(echo $val1 | sed 's/ /-/')
-        echo "NAME=$VERSION+${val2}" >> $GITHUB_ENV
-        echo "TAG=v$VERSION+${val2}" >> $GITHUB_ENV
-        ip addr
+          val1="${{ github.event.inputs.production }}"
+          val2=$(echo "$val1" | xargs | tr ' ' '-')
+          echo "NAME=$VERSION+${val2}" >> "$GITHUB_ENV"
+          echo "TAG=v$VERSION+${val2}" >> "$GITHUB_ENV"
 
-    - name: 创建目录
-      run: |
-        echo ${{ env.NAME }}
-        echo ${{ env.TAG }}
-        sudo mkdir -m 777 -p ${{ env.DIR }}
-        sudo mkdir -m 777 -p /opt/images/
+          ip addr
 
-        echo 开始编译时间 >> /opt/images/readme.txt
-        TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S' >> /opt/images/readme.txt
+      - name: 创建目录
+        shell: bash
+        run: |
+          echo "${{ env.NAME }}"
+          echo "${{ env.TAG }}"
+          sudo mkdir -m 777 -p "${{ env.DIR }}"
+          sudo mkdir -m 777 -p /opt/images/
+          echo 开始编译时间 >> /opt/images/readme.txt
+          TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S' >> /opt/images/readme.txt
 
-    - name: 准备编译环境
-      run: |
-        sudo apt install unzip libtool-bin curl cmake gperf gawk flex bison nano xxd \
-        fakeroot kmod cpio git python3-docutils gettext automake autopoint \
-        texinfo build-essential help2man pkg-config zlib1g-dev libgmp3-dev \
-        libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev wget libc-dev-bin > /dev/null
+      - name: 准备编译环境
+        shell: bash
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            unzip libtool-bin curl cmake gperf gawk flex bison nano xxd \
+            fakeroot kmod cpio git python3-docutils gettext automake autopoint \
+            texinfo build-essential help2man pkg-config zlib1g-dev libgmp3-dev \
+            libmpc-dev libmpfr-dev libncurses-dev libltdl-dev wget libc-dev-bin > /dev/null
 
-    - name: 下载源码
-      run: |
-        git clone --depth=1 https://github.com/hanwckf/rt-n56u.git ${{ env.DIR }} > /dev/null
-        cd ${{ env.DIR }}/toolchain-mipsel
-        sh dl_toolchain.sh > /dev/null
-        pwd
+      - name: 下载源码
+        shell: bash
+        run: |
+          git clone --depth=1 https://github.com/hanwckf/rt-n56u.git "${{ env.DIR }}" > /dev/null
+          cd "${{ env.DIR }}/toolchain-mipsel"
+          sh dl_toolchain.sh > /dev/null
+          pwd
 
-    - name: 启用 SmartDNS
-      env:
-        TNAME: "${{ github.event.inputs.production }}"
-      run: |
-        cd ${{ env.DIR }}/trunk
-
-        for m in $TNAME; do
-          CFG="configs/templates/${m}.config"
-          if [ -f "$CFG" ]; then
-            echo "处理 $CFG"
-
-            if grep -q "^CONFIG_FIRMWARE_INCLUDE_SMARTDNS=" "$CFG"; then
-              sed -i 's/^CONFIG_FIRMWARE_INCLUDE_SMARTDNS=.*/CONFIG_FIRMWARE_INCLUDE_SMARTDNS=y/' "$CFG"
+      - name: 启用 SmartDNS 和 KMS 服务器
+        env:
+          TNAME: "${{ github.event.inputs.production }}"
+        shell: bash
+        run: |
+          cd "${{ env.DIR }}/trunk"
+          for m in $TNAME; do
+            CFG="configs/templates/${m}.config"
+            if [ -f "$CFG" ]; then
+              echo "处理 $CFG"
+              for opt in CONFIG_FIRMWARE_INCLUDE_SMARTDNS CONFIG_FIRMWARE_INCLUDE_VLMCSD; do
+                if grep -q "^${opt}=" "$CFG"; then
+                  sed -i "s/^${opt}=.*/${opt}=y/" "$CFG"
+                else
+                  echo "${opt}=y" >> "$CFG"
+                fi
+              done
+              echo "当前插件配置:"
+              grep -E "^CONFIG_FIRMWARE_INCLUDE_(SMARTDNS|VLMCSD)=" "$CFG"
             else
-              echo "CONFIG_FIRMWARE_INCLUDE_SMARTDNS=y" >> "$CFG"
+              echo "未找到模板文件: $CFG"
             fi
+          done
 
-            echo "当前 SmartDNS 配置:"
-            grep "^CONFIG_FIRMWARE_INCLUDE_SMARTDNS=" "$CFG"
-          else
-            echo "未找到模板文件: $CFG"
+      - name: 路由器页面下加入编译时间和个人信息标签
+        shell: bash
+        run: |
+          cd "${{ env.DIR }}/trunk"
+          valtime=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M')
+          val2="\\1 footer_code +='编译日期 $valtime by <a href=\"https://github.com/tick-guo/router-rom\" target=\"blank\">tick-guo</a> \& <a href=\"https://www.right.com.cn/forum/thread-5853731-1-1.html\" target=\"blank\">恩山论坛</a><br>';"
+          sed -i "s#\(.*Non-Commercial Use Only[^;]*;\).*#$val2#" user/www/n56u_ribbon_fixed/state.js
+          grep "Non-Commercial Use Only" user/www/n56u_ribbon_fixed/state.js
+
+      - name: 开始编译
+        env:
+          TNAME: "${{ github.event.inputs.production }}"
+        shell: bash
+        run: |
+          if [ "$TNAME" = "DEBUG" ]; then
+            exit 0
           fi
-        done
 
-    - name: 路由器页面下加入编译时间和个人信息标签
-      run: |
-        cd ${{ env.DIR }}/trunk
-        valtime=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M')
-        val2="\\1 footer_code +='编译日期 $valtime by <a href=\"https://github.com/tick-guo/router-rom\" target=\"blank\">tick-guo</a> \& <a href=\"https://www.right.com.cn/forum/thread-5853731-1-1.html\" target=\"blank\">恩山论坛</a><br>';"
-        sed -i "s#\(.*Non-Commercial Use Only[^;]*;\).*#$val2#" user/www/n56u_ribbon_fixed/state.js
-        grep "Non-Commercial Use Only" user/www/n56u_ribbon_fixed/state.js
+          for m in $TNAME; do
+            echo "::group::编译 ${m}"
+            cd "${{ env.DIR }}/trunk"
+            sudo ./clear_tree || true
+            sudo ./build_firmware_modify "${m}" > /dev/null
+            ls -l images
+            sudo mv -f images/*.trx /opt/images/
+            echo "::endgroup::"
+          done
 
-    - name: 开始编译
-      env:
-        TNAME: "${{ github.event.inputs.production }}"
-      run: |
-        if [ "$TNAME" == "DEBUG" ]; then
-          exit 0
-        fi
+      - name: 收集信息
+        shell: bash
+        run: |
+          cd /opt/images
+          echo 完成编译时间 >> /opt/images/readme.txt
+          TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S' >> /opt/images/readme.txt
+          echo >> /opt/images/readme.txt
+          echo 编译版本 >> /opt/images/readme.txt
 
-        for m in $TNAME; do
-          echo "::group::编译 ${m}"
-          cd ${{ env.DIR }}/trunk
-          sudo ./clear_tree || echo
-          sudo ./build_firmware_modify ${m} > /dev/null
-          ls -l images
-          sudo mv -f images/*.trx /opt/images/
-          echo "::endgroup::"
-        done
+          pushd "${{ env.DIR }}"
+          git ls-remote --get-url origin >> /opt/images/readme.txt
+          git log -1 >> /opt/images/readme.txt
+          popd
 
-    - name: 收集信息
-      run: |
-        cd /opt/images
-        echo 完成编译时间 >> /opt/images/readme.txt
-        TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S' >> /opt/images/readme.txt
+          echo >> /opt/images/readme.txt
+          echo md5校验值 >> /opt/images/readme.txt
 
-        echo >> /opt/images/readme.txt
-        echo 编译版本 >> /opt/images/readme.txt
+          cd /opt/images
+          for i in *.trx; do
+            mv -v "$i" "${i%.*}-${{ env.VERSION }}.trx"
+          done
 
-        pushd ${{ env.DIR }}
-        git ls-remote --get-url origin >> /opt/images/readme.txt
-        git log -1 >> /opt/images/readme.txt
-        popd
+          md5sum *.trx >> /opt/images/readme.txt || true
+          ls -l
 
-        echo >> /opt/images/readme.txt
-        echo md5校验值 >> /opt/images/readme.txt
+      - name: 上传编译的固件Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: /opt/images
 
-        cd /opt/images
-        for i in *.trx; do
-          mv -v "$i" "${i%.*}-${{ env.VERSION }}.trx"
-        done
-
-        md5sum *.trx >> /opt/images/readme.txt || echo
-        ls -l
-
-    - name: 上传编译的固件Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ env.NAME }}
-        path: /opt/images
-
-    - name: 发布到Release
-      if: ${{ github.event.inputs.release == 'yes' }}
-      uses: softprops/action-gh-release@v1
-      with:
-        name: ${{ env.NAME }}
-        tag_name: ${{ env.TAG }}
-        body_path: /opt/images/readme.txt
-        draft: false
-        prerelease: false
-        files: /opt/images/*
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 发布到Release
+        if: ${{ github.event.inputs.release == 'yes' }}
+        uses: softprops/action-gh-release@v1
+        with:
+          name: ${{ env.NAME }}
+          tag_name: ${{ env.TAG }}
+          body_path: /opt/images/readme.txt
+          draft: false
+          prerelease: false
+          files: /opt/images/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
