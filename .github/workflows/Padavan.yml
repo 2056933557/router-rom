@@ -72,6 +72,8 @@ jobs:
 
       - name: 查看默认配置
         run: echo "DIR=${HOME}/rt-n56u" >> $GITHUB_ENV
+
+        
       - name: 路由器页面下加入编译时间和个人信息标签
         shell: bash
         run: |
