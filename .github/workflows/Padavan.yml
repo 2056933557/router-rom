@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   padavan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: 生成版本号
@@ -49,7 +49,7 @@ jobs:
           echo "${{ env.TAG }}"
           sudo mkdir -m 777 -p "${{ env.DIR }}"
           sudo mkdir -m 777 -p /opt/images/
-          echo 开始编译时间 >> /opt/images/readme.txt
+          echo 开始编译时间 > /opt/images/readme.txt
           TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S' >> /opt/images/readme.txt
 
       - name: 准备编译环境
@@ -70,16 +70,18 @@ jobs:
           sh dl_toolchain.sh > /dev/null
           pwd
 
-      - name: 启用 SmartDNS 和 KMS 服务器
+      - name: 强制启用 SmartDNS 和 KMS
         env:
           TNAME: "${{ github.event.inputs.production }}"
         shell: bash
         run: |
           cd "${{ env.DIR }}/trunk"
+
+          echo "1) 先修改机型模板，作为第一层保险"
           for m in $TNAME; do
             CFG="configs/templates/${m}.config"
             if [ -f "$CFG" ]; then
-              echo "处理 $CFG"
+              echo "处理模板 $CFG"
               for opt in CONFIG_FIRMWARE_INCLUDE_SMARTDNS CONFIG_FIRMWARE_INCLUDE_VLMCSD; do
                 if grep -q "^${opt}=" "$CFG"; then
                   sed -i "s/^${opt}=.*/${opt}=y/" "$CFG"
@@ -87,12 +89,44 @@ jobs:
                   echo "${opt}=y" >> "$CFG"
                 fi
               done
-              echo "当前插件配置:"
-              grep -E "^CONFIG_FIRMWARE_INCLUDE_(SMARTDNS|VLMCSD)=" "$CFG"
+              grep -E "^CONFIG_FIRMWARE_INCLUDE_(SMARTDNS|VLMCSD)=" "$CFG" || true
             else
               echo "未找到模板文件: $CFG"
+              exit 1
             fi
           done
+
+          echo
+          echo "2) 再修补 build_firmware_modify，确保每次复制模板到 .config 后再次强制写入"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("build_firmware_modify")
+          text = p.read_text(encoding="utf-8")
+
+          marker = 'cp -f configs/templates/$1.config .config\n'
+          inject = '''cp -f configs/templates/$1.config .config
+          for opt in CONFIG_FIRMWARE_INCLUDE_SMARTDNS CONFIG_FIRMWARE_INCLUDE_VLMCSD; do
+              if grep -q "^${opt}=" .config; then
+                  sed -i "s/^${opt}=.*/${opt}=y/" .config
+              else
+                  echo "${opt}=y" >> .config
+              fi
+          done
+          echo "Effective addon config for $1:"
+          grep -E "^CONFIG_FIRMWARE_INCLUDE_(SMARTDNS|VLMCSD)=" .config || true
+          '''
+
+          if "Effective addon config for $1:" not in text:
+              if marker not in text:
+                  raise SystemExit("未找到 build_firmware_modify 中的模板复制位置，无法自动注入")
+              text = text.replace(marker, inject, 1)
+              p.write_text(text, encoding="utf-8")
+          PY
+
+          echo
+          echo "3) 校验编译脚本是否已注入"
+          grep -n "Effective addon config for" build_firmware_modify
 
       - name: 路由器页面下加入编译时间和个人信息标签
         shell: bash
@@ -101,7 +135,7 @@ jobs:
           valtime=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M')
           val2="\\1 footer_code +='编译日期 $valtime by <a href=\"https://github.com/tick-guo/router-rom\" target=\"blank\">tick-guo</a> \& <a href=\"https://www.right.com.cn/forum/thread-5853731-1-1.html\" target=\"blank\">恩山论坛</a><br>';"
           sed -i "s#\(.*Non-Commercial Use Only[^;]*;\).*#$val2#" user/www/n56u_ribbon_fixed/state.js
-          grep "Non-Commercial Use Only" user/www/n56u_ribbon_fixed/state.js
+          grep "Non-Commercial Use Only" user/www/n56u_ribbon_fixed/state.js || true
 
       - name: 开始编译
         env:
@@ -115,10 +149,27 @@ jobs:
           for m in $TNAME; do
             echo "::group::编译 ${m}"
             cd "${{ env.DIR }}/trunk"
+
             sudo ./clear_tree || true
-            sudo ./build_firmware_modify "${m}" > /dev/null
+            sudo ./build_firmware_modify "${m}"
+
+            echo
+            echo "校验当前 .config 中插件开关:"
+            grep -E "^CONFIG_FIRMWARE_INCLUDE_(SMARTDNS|VLMCSD)=" .config || true
+
+            echo
+            echo "输出文件:"
             ls -l images
+
             sudo mv -f images/*.trx /opt/images/
+
+            {
+              echo
+              echo "机型: ${m}"
+              echo "插件开关:"
+              grep -E "^CONFIG_FIRMWARE_INCLUDE_(SMARTDNS|VLMCSD)=" .config || true
+            } >> /opt/images/readme.txt
+
             echo "::endgroup::"
           done
 
@@ -126,20 +177,22 @@ jobs:
         shell: bash
         run: |
           cd /opt/images
+          echo >> /opt/images/readme.txt
           echo 完成编译时间 >> /opt/images/readme.txt
           TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S' >> /opt/images/readme.txt
           echo >> /opt/images/readme.txt
           echo 编译版本 >> /opt/images/readme.txt
 
-          pushd "${{ env.DIR }}"
+          pushd "${{ env.DIR }}" > /dev/null
           git ls-remote --get-url origin >> /opt/images/readme.txt
           git log -1 >> /opt/images/readme.txt
-          popd
+          popd > /dev/null
 
           echo >> /opt/images/readme.txt
           echo md5校验值 >> /opt/images/readme.txt
 
           cd /opt/images
+          shopt -s nullglob
           for i in *.trx; do
             mv -v "$i" "${i%.*}-${{ env.VERSION }}.trx"
           done
@@ -155,7 +208,7 @@ jobs:
 
       - name: 发布到Release
         if: ${{ github.event.inputs.release == 'yes' }}
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           name: ${{ env.NAME }}
           tag_name: ${{ env.TAG }}
